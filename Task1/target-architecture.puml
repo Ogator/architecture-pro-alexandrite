@@ -1,0 +1,76 @@
+@startuml
+!include <C4/C4_Container>
+
+title Целевая архитектура «Александрита» через полгода (C4, уровень контейнеров)
+
+AddElementTag("new", $bgColor="#2e7d32", $borderColor="#1b5e20", $fontColor="#ffffff", $legendText="новый контейнер")
+AddElementTag("changed", $bgColor="#e65100", $borderColor="#bf360c", $fontColor="#ffffff", $legendText="доработанный контейнер")
+AddRelTag("new", $textColor="#2e7d32", $lineColor="#2e7d32", $legendText="новая связь")
+AddRelTag("obs", $textColor="#2e7d32", $lineColor="#2e7d32", $lineStyle=DashedLine(), $legendText="телеметрия: метрики, логи, трейсы")
+
+Person(customer, "Customer", "Покупатель B2C")
+Person(seller, "Seller", "Подтверждает заказы в CRM")
+Person(operator, "Operator", "Берёт заказы в производство")
+Person_Ext(apiUser, "API user", "B2B-партнёр")
+
+System_Boundary(jewelry, "Jewelry Store System") {
+    Container(shop, "Internet Shop", "Vue, TypeScript, Three.js", "Витрина, загрузка 3D-модели, конструктор")
+    Container(shopApi, "Shop API", "Spring Boot", "Товары, приём 3D-файлов, заказ с точки зрения покупателя")
+    ContainerDb(shopDb, "Shop DB", "PostgreSQL", "Клиенты и их заказы")
+
+    Container(crm, "CRM", "Vue, TypeScript", "Работа продавцов с заказами")
+    Container(crmApi, "CRM API", "Spring Boot", "Подтверждение заказов. Transactional Outbox, идемпотентные обработчики", $tags="changed")
+
+    Container(gateway, "API Gateway", "", "Ключи, квоты, rate limiting, версионированный контракт B2B API", $tags="new")
+
+    Container(mes, "MES", "React, TypeScript", "Дашборд операторов: возраст заказа, подсветка просрочки", $tags="changed")
+    Container(mesApi, "MES API", "C#", "Назначение заказов, список заказов. Расчёт не выполняет, передаёт заявки в очередь. Outbox", $tags="changed")
+    ContainerDb(mesDb, "MES DB", "PostgreSQL", "Заказы, назначения, статусы MES")
+    ContainerDb(mesReplica, "MES DB read replica", "PostgreSQL", "Чтение для дашборда", $tags="new")
+    ContainerDb(cache, "Cache", "Redis", "Первые страницы дашборда по статусам", $tags="new")
+
+    Container(calc, "Price Calculation Service", "C#, автомасштабирование", "Асинхронный расчёт стоимости по 3D-модели", $tags="new")
+    ContainerQueue(mq, "Messages Queue", "RabbitMQ", "События заказов. Durable-очереди, DLX, retry", $tags="changed")
+    ContainerDb(s3, "3D files storage", "S3", "3D-модели для расчёта")
+
+    Container(recon, "Reconciliation Job", "по расписанию", "Сверка статусов между системами, поиск зависших заказов", $tags="new")
+    Container(obs, "Observability", "OTel Collector, Prometheus, Grafana, Jaeger, OpenSearch, Alertmanager", "Метрики, логи, трейсы, алерты на SLA статусов", $tags="new")
+}
+
+Rel(customer, shop, "Оформляет заказ")
+Rel(seller, crm, "Подтверждает заказы")
+Rel(operator, mes, "Берёт заказы в работу")
+Rel(apiUser, gateway, "Запрашивает расчёт, создаёт заказ", "HTTPS", $tags="new")
+
+Rel(shop, shopApi, "API-вызовы")
+Rel(shopApi, shopDb, "Читает и пишет")
+Rel(shopApi, s3, "Загружает файлы")
+
+Rel(crm, crmApi, "API-вызовы")
+Rel(crmApi, shopDb, "Читает и пишет")
+Rel(crmApi, s3, "Читает файлы")
+BiRel(crmApi, mq, "События заказов")
+
+Rel(gateway, mesApi, "Проксирует запросы", $tags="new")
+Rel(mes, mesApi, "API-вызовы")
+Rel(mesApi, mesDb, "Пишет")
+Rel(mesApi, mesReplica, "Читает список заказов", $tags="new")
+Rel(mesApi, cache, "Читает и инвалидирует", $tags="new")
+Rel(mesDb, mesReplica, "Репликация", $tags="new")
+BiRel(mesApi, mq, "События заказов, заявки на расчёт")
+
+BiRel(calc, mq, "Заявки на расчёт / результаты", $tags="new")
+Rel(calc, s3, "Читает 3D-модели", $tags="new")
+
+Rel(recon, shopDb, "Читает статусы", $tags="new")
+Rel(recon, mesDb, "Читает статусы", $tags="new")
+Rel(recon, mq, "Переотправляет события", $tags="new")
+
+Rel(shopApi, obs, "Телеметрия", $tags="obs")
+Rel(crmApi, obs, "Телеметрия", $tags="obs")
+Rel(mesApi, obs, "Телеметрия", $tags="obs")
+Rel(calc, obs, "Телеметрия", $tags="obs")
+Rel(mq, obs, "Метрики очередей", $tags="obs")
+
+SHOW_LEGEND()
+@enduml
