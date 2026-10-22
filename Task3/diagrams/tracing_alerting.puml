@@ -1,0 +1,87 @@
+@startuml
+!include <C4/C4_Container>
+AddElementTag("traced", $borderColor="#d32f2f", $borderThickness="4", $legendText="инструментирован OpenTelemetry (красная рамка)")
+AddElementTag("trace", $bgColor="#d32f2f", $borderColor="#b71c1c", $fontColor="#ffffff", $legendText="новый компонент трейсинга")
+AddRelTag("trace", $textColor="#d32f2f", $lineColor="#d32f2f", $legendText="новая связь трейсинга")
+AddRelTag("ctx", $textColor="#d32f2f", $lineColor="#d32f2f", $lineStyle=BoldLine(), $legendText="контекст трейса в заголовках сообщений")
+AddElementTag("alert", $bgColor="#2e7d32", $borderColor="#1b5e20", $fontColor="#ffffff", $legendText="мониторинг заказов и алертинг (дополнительное задание)")
+AddRelTag("alert", $textColor="#2e7d32", $lineColor="#2e7d32", $legendText="новая связь мониторинга и алертинга")
+title Трейсинг заказов + автоматический мониторинг прохождения заказа и алертинг (зелёным)
+' Текущая архитектура «Александрита» (по jewerly_c4_model.drawio)
+Person(customer, "Customer", "Покупатель B2C")
+Person(seller, "Seller", "Работает с заказами, подтверждает производство")
+Person_Ext(apiUser, "API user", "B2B-партнёр")
+Person(operator, "Operator", "Берёт заказы в работу, производит изделия")
+
+System_Boundary(jewelry, "Jewelry Store System") {
+    Container(shop, "Internet Shop", "Vue, TypeScript, Three.js", "Заказ, загрузка 3D-модели, 3D-редактор")
+    Container(shopApi, "Shop API", "Spring Boot", "Товары, приём 3D-файлов, заказ с точки зрения покупателя", $tags="traced")
+    ContainerDb(shopDb, "Shop DB", "PostgreSQL", "Клиенты и их заказы")
+
+    Container(crm, "CRM", "Vue, TypeScript", "Работа продавцов с заказами")
+    Container(crmApi, "CRM API", "Spring Boot", "Подтверждение заказов", $tags="traced")
+
+    ContainerQueue(mq, "Messages Queue", "RabbitMQ", "Сообщения о новых заказах и смене статусов", $tags="traced")
+    ContainerDb(s3, "3d files storage", "S3", "3D-файлы для расчёта")
+
+    Container(mesApi, "MES API", "C#", "Назначение заказов операторам, список заказов, расчёт стоимости", $tags="traced")
+    Container(mes, "MES", "React, TypeScript", "Назначение заказов операторам, список заказов")
+    ContainerDb(mesDb, "MES DB", "PostgreSQL", "Заказы, назначения, статусы MES")
+}
+
+Rel(customer, shop, "Оформляет заказ")
+Rel(seller, crm, "Работает с заказами")
+Rel(apiUser, mesApi, "Расчёт стоимости, заказ", "HTTPS")
+Rel(operator, mes, "Берёт заказы в работу")
+
+Rel(shop, shopApi, "API-вызовы")
+Rel(shopApi, shopDb, "Читает и пишет")
+Rel(shopApi, s3, "Загружает файлы")
+Rel(crm, crmApi, "API-вызовы")
+Rel(crmApi, shopDb, "Читает и пишет")
+Rel(crmApi, s3, "Читает файлы")
+BiRel(crmApi, mq, "События заказов + traceparent", $tags="ctx")
+Rel(mes, mesApi, "API-вызовы")
+Rel(mesApi, mesDb, "Читает и пишет")
+Rel(mesApi, s3, "Читает файлы")
+BiRel(mesApi, mq, "События заказов + traceparent", $tags="ctx")
+Person(support, "Support / Developer", "Сотрудник с ролью «Поддержка» или «Разработка»", $tags="trace")
+
+System_Boundary(obs, "Tracing") {
+    Container(otelCol, "OTel Collector", "OpenTelemetry Collector", "Приём спанов по OTLP, очистка чувствительных атрибутов, tail-sampling", $tags="trace")
+    Container(jaeger, "Jaeger", "Jaeger Collector + Query/UI", "Приём, поиск и визуализация трейсов", $tags="trace")
+    ContainerDb(traceDb, "Trace storage", "OpenSearch", "Трейсы заказов — 60 дней, прочие — 7 дней", $tags="trace")
+    Container(authProxy, "Auth proxy", "oauth2-proxy + корпоративный SSO", "Вход только сотрудникам с ролью", $tags="trace")
+}
+
+Rel(shopApi, otelCol, "Спаны", "OTLP/gRPC, TLS", $tags="trace")
+Rel(crmApi, otelCol, "Спаны", "OTLP/gRPC, TLS", $tags="trace")
+Rel(mesApi, otelCol, "Спаны", "OTLP/gRPC, TLS", $tags="trace")
+Rel(otelCol, jaeger, "Отфильтрованные спаны", "OTLP", $tags="trace")
+Rel(jaeger, traceDb, "Пишет и ищет трейсы", $tags="trace")
+Rel(support, authProxy, "Ищет трейс по order_id", "HTTPS", $tags="trace")
+Rel(authProxy, jaeger, "Проксирует в Jaeger UI", $tags="trace")
+
+Person(onCall, "On-call engineer", "Дежурный инженер", $tags="alert")
+System_Ext(notify, "Каналы оповещения", "Рабочий чат, трекер задач, звонок дежурному", $tags="alert")
+
+System_Boundary(orderMon, "Order flow monitoring") {
+    Container(flowMon, "Order Flow Monitor", "сервис (Java / Spring Boot)", "Собирает спаны по order_id в путь заказа, находит потерянные сообщения, ошибки и зависания по шагам", $tags="alert")
+    ContainerDb(flowDb, "Order flow state", "PostgreSQL", "Последний шаг каждого заказа, ожидаемый следующий шаг, дедлайн", $tags="alert")
+    Container(prom, "Prometheus", "Prometheus", "Метрики шагов заказа и спанов (spanmetrics)", $tags="alert")
+    Container(alertmgr, "Alertmanager", "Alertmanager", "Маршрутизация алертов по важности", $tags="alert")
+    Container(grafana, "Grafana", "Grafana", "Дашборд прохождения заказов, переход к трейсу в Jaeger", $tags="alert")
+}
+
+Rel(otelCol, flowMon, "Копия спанов заказов", "OTLP", $tags="alert")
+Rel(flowMon, flowDb, "Пишет и читает состояние", $tags="alert")
+Rel(prom, otelCol, "Забирает spanmetrics", "HTTP", $tags="alert")
+Rel(prom, flowMon, "Забирает метрики заказов", "HTTP", $tags="alert")
+Rel(prom, alertmgr, "Сработавшие правила", $tags="alert")
+Rel(alertmgr, notify, "Алерт со ссылкой на трейс", $tags="alert")
+Rel(notify, onCall, "Оповещает", $tags="alert")
+Rel(grafana, prom, "Читает метрики", $tags="alert")
+Rel(grafana, jaeger, "Открывает трейс", $tags="alert")
+Rel(support, grafana, "Смотрит дашборд", $tags="alert")
+SHOW_LEGEND()
+@enduml

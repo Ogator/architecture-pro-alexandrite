@@ -1,0 +1,76 @@
+@startuml
+!theme plain
+skinparam sequenceMessageAlign left
+skinparam responseMessageBelowArrow true
+title Решение 1. Cache-Aside + программная инвалидация по версии статуса
+
+actor "Оператор" as op
+participant "MES UI\n(React)" as ui
+participant "MES API\n(C#)" as api
+database "Redis\n(кеш)" as cache
+database "MES DB\n(PostgreSQL)" as db
+queue "RabbitMQ" as mq
+participant "CRM API" as crm
+
+== 1. Чтение списка заказов (первая страница статуса MANUFACTURING_APPROVED) ==
+op -> ui : открывает дашборд
+ui -> api : GET /orders?status=MANUFACTURING_APPROVED&limit=50
+api -> cache : GET orders:ver:MANUFACTURING_APPROVED
+cache --> api : 41
+note right of api
+  Ключ страницы содержит версию статуса:
+  orders:list:MANUFACTURING_APPROVED:v41:first:50
+end note
+api -> cache : GET orders:list:MANUFACTURING_APPROVED:v41:first:50
+alt Попадание в кеш
+  cache --> api : JSON страницы
+else Промах (страницы нет или версия сменилась)
+  cache --> api : nil
+  api -> db : SELECT ... WHERE status = 'MANUFACTURING_APPROVED'\nORDER BY created_at DESC, id DESC LIMIT 50\n(индекс по status, created_at; keyset-пагинация)
+  db --> api : 50 заказов
+  api -> cache : SET orders:list:...:v41:first:50 <JSON> EX 60
+end
+api --> ui : 200 OK, список заказов
+ui --> op : самые новые заказы сверху
+
+== 2. Запись: оператор берёт заказ в работу ==
+op -> ui : «Взять в работу» заказ ORD-4512
+ui -> api : POST /orders/ORD-4512/take
+api -> db : BEGIN\nUPDATE orders SET status = 'MANUFACTURING_STARTED', operator_id = :op\nWHERE id = 'ORD-4512' AND status = 'MANUFACTURING_APPROVED'\nAND operator_id IS NULL\nINSERT INTO outbox (событие OrderStatusChanged)\nCOMMIT
+alt Обновлена 1 строка (заказ взят)
+  db --> api : OK
+  api -> cache : INCR orders:ver:MANUFACTURING_APPROVED  (→ 42)
+  api -> cache : INCR orders:ver:MANUFACTURING_STARTED
+  api -> cache : DEL order:ORD-4512
+  note right of api
+    Старые страницы с v41 больше никто не читает,
+    они удалятся сами по TTL. Удалять их по маске не нужно.
+  end note
+  api --> ui : 200 OK
+else Обновлено 0 строк (заказ уже взял другой оператор)
+  db --> api : 0 rows
+  api --> ui : 409 Conflict «Заказ уже взят»
+end
+ui -> api : GET /orders?status=MANUFACTURING_APPROVED&limit=50
+api -> cache : GET orders:ver:... → 42, GET страницы v42 → промах
+api -> db : SELECT ... (свежие данные)
+api -> cache : SET orders:list:...:v42:first:50 EX 60
+api --> ui : обновлённый список без взятого заказа
+
+== 3. Запись: изменение статуса приходит из CRM через RabbitMQ ==
+crm -> mq : OrderApproved (ORD-4600)
+mq -> api : доставка сообщения
+api -> db : BEGIN; UPDATE orders SET status = 'MANUFACTURING_APPROVED' ...; COMMIT
+api -> cache : INCR orders:ver:PRICE_CALCULATED\nINCR orders:ver:MANUFACTURING_APPROVED\nDEL order:ORD-4600
+api -> mq : ack
+note over ui, api
+  Следующий запрос дашборда получает промах по новой версии
+  и видит новый заказ сразу, а не через TTL.
+end note
+
+== Отказ кеша ==
+note over api, cache
+  Redis недоступен: чтение идёт напрямую в MES DB, запись в кеш пропускается, пишется WARN.
+  Не удалось увеличить версию: страница устареет не больше чем на TTL (60 с).
+end note
+@enduml

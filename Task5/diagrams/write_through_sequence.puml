@@ -1,0 +1,45 @@
+@startuml
+!theme plain
+skinparam sequenceMessageAlign left
+skinparam responseMessageBelowArrow true
+title Решение 2. Write-Through: готовые списки по статусам в Redis (sorted set)
+
+actor "Оператор" as op
+participant "MES UI\n(React)" as ui
+participant "MES API\n(C#)" as api
+database "Redis\n(списки по статусам)" as cache
+database "MES DB\n(PostgreSQL)" as db
+
+== 1. Чтение списка заказов ==
+op -> ui : открывает дашборд
+ui -> api : GET /orders?status=MANUFACTURING_APPROVED&limit=50
+api -> cache : ZREVRANGE status:MANUFACTURING_APPROVED 0 49\n(id заказов, отсортированные по created_at)
+cache --> api : 50 id
+api -> cache : HMGET / MGET order:{id} для 50 заказов
+cache --> api : карточки заказов
+note right of api
+  В БД при чтении не ходим совсем.
+  Промах возможен только после сбоя кеша:
+  тогда список перестраивается из MES DB.
+end note
+api --> ui : 200 OK, список заказов
+
+== 2. Запись: оператор берёт заказ в работу ==
+op -> ui : «Взять в работу» ORD-4512
+ui -> api : POST /orders/ORD-4512/take
+api -> db : BEGIN; UPDATE ... WHERE status = 'MANUFACTURING_APPROVED' AND operator_id IS NULL; COMMIT
+alt Заказ взят
+  db --> api : OK
+  api -> cache : MULTI\nZREM status:MANUFACTURING_APPROVED ORD-4512\nZADD status:MANUFACTURING_STARTED <created_at> ORD-4512\nHSET order:ORD-4512 status MANUFACTURING_STARTED operator_id ...\nEXEC
+  api --> ui : 200 OK
+else Уже взят другим оператором
+  api --> ui : 409 Conflict
+end
+
+== 3. Восстановление после сбоя ==
+note over api, db
+  Если запись в Redis не удалась после COMMIT в БД, кеш расходится с БД.
+  Нужна фоновая сверка: периодически сравнивать списки в Redis с MES DB
+  и полностью перестраивать их после рестарта Redis.
+end note
+@enduml

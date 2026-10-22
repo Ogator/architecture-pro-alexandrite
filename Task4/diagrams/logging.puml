@@ -1,0 +1,73 @@
+@startuml
+!include <C4/C4_Container>
+AddElementTag("logged", $borderColor="#d32f2f", $borderThickness="4", $legendText="источник логов (красная рамка)")
+AddElementTag("log", $bgColor="#d32f2f", $borderColor="#b71c1c", $fontColor="#ffffff", $legendText="новый компонент логирования")
+AddRelTag("log", $textColor="#d32f2f", $lineColor="#d32f2f", $legendText="новая связь логирования")
+title Централизованное логирование: источники логов и новые компоненты (красным)
+
+' Текущая архитектура «Александрита» (по jewerly_c4_model.drawio)
+Person(customer, "Customer", "Покупатель B2C")
+Person(seller, "Seller", "Работает с заказами, подтверждает производство")
+Person_Ext(apiUser, "API user", "B2B-партнёр")
+Person(operator, "Operator", "Берёт заказы в работу, производит изделия")
+
+System_Boundary(jewelry, "Jewelry Store System") {
+    Container(shop, "Internet Shop", "Vue, TypeScript, Three.js", "Заказ, загрузка 3D-модели, 3D-редактор")
+    Container(shopApi, "Shop API", "Spring Boot", "Товары, приём 3D-файлов, заказ с точки зрения покупателя", $tags="logged")
+    ContainerDb(shopDb, "Shop DB", "PostgreSQL", "Клиенты и их заказы", $tags="logged")
+
+    Container(crm, "CRM", "Vue, TypeScript", "Работа продавцов с заказами")
+    Container(crmApi, "CRM API", "Spring Boot", "Подтверждение заказов", $tags="logged")
+
+    ContainerQueue(mq, "Messages Queue", "RabbitMQ", "Сообщения о новых заказах и смене статусов", $tags="logged")
+    ContainerDb(s3, "3d files storage", "S3", "3D-файлы для расчёта")
+
+    Container(mesApi, "MES API", "C#", "Назначение заказов операторам, список заказов, расчёт стоимости", $tags="logged")
+    Container(mes, "MES", "React, TypeScript", "Назначение заказов операторам, список заказов")
+    ContainerDb(mesDb, "MES DB", "PostgreSQL", "Заказы, назначения, статусы MES", $tags="logged")
+}
+
+Rel(customer, shop, "Оформляет заказ")
+Rel(seller, crm, "Работает с заказами")
+Rel(apiUser, mesApi, "Расчёт стоимости, заказ", "HTTPS")
+Rel(operator, mes, "Берёт заказы в работу")
+
+Rel(shop, shopApi, "API-вызовы")
+Rel(shopApi, shopDb, "Читает и пишет")
+Rel(shopApi, s3, "Загружает файлы")
+Rel(crm, crmApi, "API-вызовы")
+Rel(crmApi, shopDb, "Читает и пишет")
+Rel(crmApi, s3, "Читает файлы")
+BiRel(crmApi, mq, "События заказов")
+Rel(mes, mesApi, "API-вызовы")
+Rel(mesApi, mesDb, "Читает и пишет")
+Rel(mesApi, s3, "Читает файлы")
+BiRel(mesApi, mq, "События заказов")
+
+Person(staff, "Support / Developer / DevOps", "Сотрудники с ролью доступа к логам", $tags="log")
+System_Ext(cloudLogging, "Yandex Cloud Logging", "Логи управляемых PostgreSQL: медленные запросы, ошибки, блокировки", $tags="log")
+System_Ext(notify, "Каналы оповещения", "Alertmanager из задания 2: рабочий чат, трекер, звонок дежурному", $tags="log")
+
+System_Boundary(logging, "Logging") {
+    Container(agent, "Log agents", "Fluent Bit на каждой ВМ", "Читает JSON-логи приложений и брокера, буферизует на диске", $tags="log")
+    Container(processor, "Log processor", "Fluent Bit (агрегатор)", "Маскирование чувствительных данных, обогащение, маршрутизация по индексам", $tags="log")
+    ContainerDb(logStore, "Log storage", "OpenSearch", "Индекс на каждую систему и день. Политики хранения ISM", $tags="log")
+    Container(alerting, "Alerting & Anomaly Detection", "плагины OpenSearch", "Правила на ошибки и события, поиск аномалий", $tags="log")
+    Container(dashboards, "OpenSearch Dashboards", "за SSO (oauth2-proxy)", "Поиск по order_id и trace_id, дашборды ошибок", $tags="log")
+}
+
+Rel(shopApi, agent, "JSON-логи", "файл", $tags="log")
+Rel(crmApi, agent, "JSON-логи", "файл", $tags="log")
+Rel(mesApi, agent, "JSON-логи", "файл", $tags="log")
+Rel(mq, agent, "Логи брокера", "файл", $tags="log")
+Rel(shopDb, cloudLogging, "Логи БД", $tags="log")
+Rel(mesDb, cloudLogging, "Логи БД", $tags="log")
+Rel(agent, processor, "Логи", "Forward, TLS", $tags="log")
+Rel(processor, cloudLogging, "Забирает логи БД", "API", $tags="log")
+Rel(processor, logStore, "Очищенные логи", "HTTPS", $tags="log")
+Rel(alerting, logStore, "Выполняет запросы по расписанию", $tags="log")
+Rel(alerting, notify, "Алерты", "webhook", $tags="log")
+Rel(dashboards, logStore, "Поиск", $tags="log")
+Rel(staff, dashboards, "Ищет логи заказа", "HTTPS", $tags="log")
+SHOW_LEGEND()
+@enduml
